@@ -10,7 +10,7 @@ use petgraph::{
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{Instrument, Span};
+use tracing::Span;
 use turbo_rcstr::RcStr;
 use turbo_tasks::{
     graph::{AdjacencyMap, GraphTraversal, Visit, VisitControlFlow},
@@ -24,6 +24,7 @@ use crate::{
     module::{Module, Modules},
     module_graph::{
         chunk_group_info::{compute_chunk_group_info, ChunkGroupInfo},
+        module_batches::{compute_module_batches, ModuleBatchesGraph},
         traced_di_graph::TracedDiGraph,
     },
     reference::primary_chunkable_referenced_modules,
@@ -31,6 +32,7 @@ use crate::{
 
 pub mod chunk_group_info;
 pub mod module_batch;
+pub(crate) mod module_batches;
 mod traced_di_graph;
 
 #[derive(
@@ -541,9 +543,12 @@ impl SingleModuleGraph {
                     if let SingleModuleGraphNode::Module(current_node) =
                         graph.node_weight(current).unwrap()
                     {
-                        let action = visit_preorder(parent_arg, current_node, state);
+                        let action = visit_preorder(parent_arg, current_node, state)?;
+                        if action == GraphTraversalAction::Exclude {
+                            continue;
+                        }
                         stack.push((ReverseTopologicalPass::Visit, parent, current));
-                        if action? == GraphTraversalAction::Continue && expanded.insert(current) {
+                        if action == GraphTraversalAction::Continue && expanded.insert(current) {
                             stack.extend(iter_neighbors(graph, current).map(|(edge, child)| {
                                 (
                                     ReverseTopologicalPass::ExpandAndVisit,
@@ -594,9 +599,12 @@ impl ModuleGraph {
 
     #[turbo_tasks::function]
     pub async fn chunk_group_info(&self) -> Result<Vc<ChunkGroupInfo>> {
-        compute_chunk_group_info(self)
-            .instrument(tracing::info_span!("compute_chunk_group_info"))
-            .await
+        compute_chunk_group_info(self).await
+    }
+
+    #[turbo_tasks::function]
+    pub async fn module_batches(self: Vc<Self>) -> Result<Vc<ModuleBatchesGraph>> {
+        compute_module_batches(self).await
     }
 }
 
@@ -869,9 +877,12 @@ impl ModuleGraph {
                     visit_postorder(parent_arg, current_node, state);
                 }
                 ReverseTopologicalPass::ExpandAndVisit => {
-                    let action = visit_preorder(parent_arg, current_node, state);
+                    let action = visit_preorder(parent_arg, current_node, state)?;
+                    if action == GraphTraversalAction::Exclude {
+                        continue;
+                    }
                     stack.push((ReverseTopologicalPass::Visit, parent, current));
-                    if action? == GraphTraversalAction::Continue && expanded.insert(current) {
+                    if action == GraphTraversalAction::Continue && expanded.insert(current) {
                         let graph = &graphs[current.graph_idx].graph;
                         let (neighbors, current) =
                             match graph.node_weight(current.node_idx).unwrap() {
@@ -959,8 +970,10 @@ impl SingleModuleGraphNode {
 pub enum GraphTraversalAction {
     /// Continue visiting children
     Continue,
-    /// Skip the immediate children
+    /// Skip the immediate children, but visit the node in postorder
     Skip,
+    /// Skip the immediate children and the node in postorder
+    Exclude,
 }
 
 // These nodes are created while walking the Turbopack modules references, and are used to then
