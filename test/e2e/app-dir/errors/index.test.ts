@@ -184,8 +184,9 @@ describe('app-dir - errors', () => {
         )
       }
 
-      // FIXME(veil): Should contain thrown error.
-      expect(pageErrors).toEqual([])
+      expect(pageErrors).toEqual([
+        expect.objectContaining({ message: 'this is a test' }),
+      ])
     })
 
     it('should display error digest for error in server component with default error boundary', async () => {
@@ -212,8 +213,16 @@ describe('app-dir - errors', () => {
         ).toMatch(/Digest: \w+/)
       }
 
-      // FIXME(veil): Should contain thrown error.
-      expect(pageErrors).toEqual([])
+      expect(pageErrors).toEqual([
+        expect.objectContaining({
+          message: isNextDev
+            ? 'custom server error'
+            : // Actual message hidden in prod
+              expect.stringContaining(
+                'An error occurred in the Server Components render.'
+              ),
+        }),
+      ])
     })
 
     // production tests
@@ -244,13 +253,17 @@ describe('app-dir - errors', () => {
       })
 
       it('should hydrate empty shell to handle server-side rendering errors', async () => {
-        const browser = await next.browser('/ssr-error-client-component')
-        const logs = await browser.log()
-        const errors = logs
-          .filter((x) => x.source === 'error')
-          .map((x) => x.message)
-          .join('\n')
-        expect(errors).toInclude('Error during SSR')
+        const pageErrors: unknown[] = []
+        await next.browser('/ssr-error-client-component', {
+          beforePageLoad: (page) => {
+            page.on('pageerror', (error: unknown) => {
+              pageErrors.push(error)
+            })
+          },
+        })
+        expect(pageErrors).toEqual([
+          expect.objectContaining({ message: 'Error during SSR' }),
+        ])
       })
 
       it('should log the original RSC error trace in production', async () => {
